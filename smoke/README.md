@@ -52,8 +52,23 @@ get wrong and invisible in manual testing:
   port is *not* reachable on the host's routable address. Production runs the watcher in a
   `podman kube play` pod behind a networking sidecar that reaches it over loopback; listening
   on all interfaces would publish `/ping` on the pod IP. Skipped on loopback-only hosts.
+- **A wrong method is a 404, not a 405.** A 405 on `GET /ping/<token>` confirms the route exists
+  whatever token was tried, which defeats the 404-on-mismatch rule. Most frameworks do this by
+  default, so it is checked rather than trusted.
 - **Restart behaviour**, by actually killing the process mid-outage and booting it again
   against the same statefile (SPEC rule 4), and by booting with no statefile at all (rule 3).
+
+## What it does *not* assert
+
+Two clauses of the contract are left to each impl's own tests, because forcing them from outside
+the process is impractical:
+
+- **Rule 5's retry semantics** — a notification that fails mid-page, and a ping that races a send.
+  The harness cannot make the capture server fail on cue without becoming a mock.
+- **The atomic statefile write** — a crash between the temp write and the rename.
+
+`python/tests/` covers both. An impl that skips them can still pass this suite, so don't read a
+green run as proof they hold.
 - **Process groups are killed, not just the launcher** — a launcher like `scala-cli` spawns a
   JVM child that would otherwise survive and hold the port.
 

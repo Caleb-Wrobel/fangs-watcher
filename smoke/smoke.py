@@ -208,7 +208,22 @@ def run_checks(manifest: Manifest, capture: Capture, capture_port: int) -> list[
                 raise CheckFailed(f"alerted should be false after first ping: {state}")
             return f"last_seen = {state['last_seen']}"
 
+        def method_mismatch_is_404() -> str:
+            """A 405 would confirm the route exists whatever token was tried."""
+            unknown = http_status(f"{watcher.base_url}/no-such-route")
+            if unknown != 404:
+                raise CheckFailed(f"GET /no-such-route → {unknown}, want 404")
+            for method, path in [("GET", f"/ping/{TOKEN}"), ("POST", "/healthz")]:
+                status = http_status(f"{watcher.base_url}{path}", method=method)
+                if status != 404:
+                    raise CheckFailed(
+                        f"{method} {path} → {status}, want 404 — a {status} here reveals "
+                        f"the route exists regardless of the token (SPEC.md § HTTP surface)"
+                    )
+            return "wrong method is indistinguishable from an unknown path"
+
         check("2a. POST /ping/<wrong> → 404", wrong_token_is_404)
+        check("2c. wrong method → 404, not 405", method_mismatch_is_404)
         check("2b. POST /ping/<token> → 200, state persisted", right_token_records)
 
         # ── the self-heartbeat ───────────────────────────────────────────

@@ -19,6 +19,12 @@ persists just enough state to survive its own restart without lying.
 
 No other routes. No auth beyond the token-in-path (a capability URL; see Security).
 
+**A wrong method is a `404`, not a `405`.** Many frameworks answer a path that matches with the
+wrong method by returning `405 Method Not Allowed` — which confirms the route exists *whatever
+token was tried*, defeating the `404`-on-mismatch rule above just as thoroughly as a `401` would.
+An unknown path and a known path with the wrong method must be indistinguishable. (Concretely:
+`GET /ping/{anything}` and `POST /healthz` both return `404`.)
+
 ## State
 
 Two fields, and nothing else:
@@ -39,6 +45,17 @@ Two fields, and nothing else:
    watcher loads `last_seen`/`alerted` and the next tick evaluates rule 2 against them — a process that
    restarts while the subject is already dark will page on its first post-restart tick (unless it had
    already alerted, in which case it stays silent — no duplicate page).
+5. **A notification that fails to send leaves `alerted` unchanged, and is retried while it still
+   applies.** `alerted` means *a page was delivered*, not *a page was attempted* — persisting `true`
+   for a page nobody received would silence the retry and lose the outage entirely. So:
+   - A failed **down** page leaves `alerted = false`; the next tick re-evaluates rule 2 and tries
+     again, with a freshly computed `{elapsed}`.
+   - A failed **recovery** notice leaves `alerted = true`; the next accepted ping tries again.
+   - "While it still applies" is load-bearing. An implementation may mark `alerted = true` *before*
+     sending, to stop a slow webhook from letting the next tick page twice — but if the send then
+     fails it must not roll that mark back over a ping that arrived meanwhile. A check-in during a
+     failing page means the subject is demonstrably alive: the ping wins, the watcher ends disarmed,
+     and the page is no longer applicable.
 
 ### Statefile
 
@@ -47,6 +64,11 @@ Two fields, and nothing else:
 - **Atomic write on every change:** write to a temp file in the same directory → `fsync` → `rename`
   over the real path. A crash mid-write must leave the previous complete state, never a torn file.
 - Path is configured (`WATCHER_STATE_FILE`). Absent file at startup = fresh/disarmed (rule 3).
+- **A corrupt or unreadable statefile degrades to fresh — it must never stop the watcher booting.**
+  Refusing to start would take the dead-man's switch down permanently over a file the watcher can
+  simply rewrite on the next ping. A briefly disarmed watcher is recoverable; a watcher that is not
+  running is not. Log a warning, start disarmed, re-arm on the next ping. (This is the one place the
+  watcher may lose state: the alternative is losing the watcher.)
 
 ## Notifications
 
@@ -107,6 +129,7 @@ short period/grace), then assert, in order:
 
 1. `GET /healthz` → `200`.
 2. `POST /ping/{wrong}` → `404`; `POST /ping/{token}` → `200`, and the statefile now has a `last_seen`.
+   `GET /ping/{token}` → `404` too, indistinguishable from an unknown path.
 3. Withhold pings past `period + grace` → the capture server receives exactly one **down** message.
 4. `POST /ping/{token}` again → the capture server receives one **recovery** message; `alerted` is now
    `false`.
