@@ -1,0 +1,105 @@
+# fangs-watcher — the contract
+
+This is the authoritative behavioral contract for the watcher. **Every implementation** in this repo
+(`scala/`, `go/`, …) satisfies exactly this, and the shared **smoke test** verifies any of them
+against it. The languages are interchangeable; this document is the fixed point.
+
+## What it is
+
+An off-fleet **dead-man's switch**. Something (in production: the fangs gateway `limen`) checks in on
+an interval. The watcher pages when the check-ins **stop**, and pages again when they **resume**. It
+persists just enough state to survive its own restart without lying.
+
+## HTTP surface
+
+| Method & path | Purpose | Response |
+|---|---|---|
+| `POST /ping/{token}` | Record a check-in. `{token}` must equal the configured secret. | `200` on match; **`404`** on mismatch (do not reveal the endpoint exists) |
+| `GET /healthz` | The watcher's *own* liveness (for the host / a fronting proxy). | `200` while the process is up |
+
+No other routes. No auth beyond the token-in-path (a capability URL; see Security).
+
+## State
+
+Two fields, and nothing else:
+
+- `last_seen` — timestamp of the most recent accepted ping (or **absent** when never pinged).
+- `alerted` — boolean; `true` while a "gone dark" page is outstanding.
+
+### The rules (this is the feature — implement exactly)
+
+1. **On an accepted ping:** set `last_seen = now`. If `alerted` was `true`, send a **recovery** notice
+   and set `alerted = false`.
+2. **On each ticker tick (every `period`):** if `last_seen` is present **and** `now - last_seen >
+   period + grace` **and** `alerted` is `false` → send a **down** page and set `alerted = true`.
+3. **Arm on first ping only.** If `last_seen` is **absent** (fresh install, no state), the watcher is
+   *disarmed*: it sends nothing until the first ping arrives. A watcher that has never been pinged must
+   never page.
+4. **A restart during an outage must still page.** State is persisted (below), so on startup the
+   watcher loads `last_seen`/`alerted` and the next tick evaluates rule 2 against them — a process that
+   restarts while the subject is already dark will page on its first post-restart tick (unless it had
+   already alerted, in which case it stays silent — no duplicate page).
+
+### Statefile
+
+- JSON, human-readable (you will `cat` it during an incident): `{"last_seen": <iso8601|null>,
+  "alerted": <bool>}`.
+- **Atomic write on every change:** write to a temp file in the same directory → `fsync` → `rename`
+  over the real path. A crash mid-write must leave the previous complete state, never a torn file.
+- Path is configured (`WATCHER_STATE_FILE`). Absent file at startup = fresh/disarmed (rule 3).
+
+## Notifications
+
+A notification is an HTTP `POST` of `{"content": "<message>"}` (Discord-webhook shape) to the
+configured webhook URL. In tests the URL points at a local capture server — the watcher does not know
+or care that it's Discord.
+
+- **Down:** `🚨 {subject} is dark — no check-in for {elapsed}. Last check-in: {last_seen}.`
+- **Recovery:** `✅ {subject} is back — check-in resumed at {now}.`
+
+`{subject}` is configured (`WATCHER_SUBJECT`, e.g. `limen`). `{elapsed}` is human-readable
+(e.g. `18m`). A failed notification POST is logged and retried on the next tick if still applicable;
+it never crashes the watcher.
+
+## healthchecks.io self-heartbeat (optional)
+
+If `WATCHER_HEALTHCHECK_URL` is set, the watcher `GET`s it on each ticker tick — so the managed floor
+(healthchecks.io) watches the watcher, and a dead watcher pages *there*. Unset → skipped. (Present in
+the contract from day one; wired to a real check at the production cutover.)
+
+## Configuration (environment only — 12-factor)
+
+| Variable | Meaning | Default |
+|---|---|---|
+| `WATCHER_TOKEN` | the ping-path secret | *required* |
+| `WATCHER_DISCORD_WEBHOOK` | notification POST target | *required* |
+| `WATCHER_SUBJECT` | what's being watched, for messages | `the subject` |
+| `WATCHER_PERIOD_SECONDS` | ticker interval / expected check-in cadence | `300` |
+| `WATCHER_GRACE_SECONDS` | forgiveness beyond one period before paging | `900` |
+| `WATCHER_STATE_FILE` | statefile path | `./watcher-state.json` |
+| `WATCHER_PORT` | HTTP listen port | `8080` |
+| `WATCHER_HEALTHCHECK_URL` | healthchecks.io self-heartbeat (optional) | *unset* |
+
+No secret (`WATCHER_TOKEN`, `WATCHER_DISCORD_WEBHOOK`) ever appears in the repo, a commit, or a log line.
+
+## Security notes
+
+- The **token in the path is a bearer credential** — the unguessable URL *is* the auth. Threat model
+  is false-alive spoofing (someone faking the subject's pulse), not data theft. A wrong token is a
+  `404`, never a hint. Over TLS the path is encrypted in transit (TLS is added by a fronting proxy, not
+  the watcher itself).
+- The watcher makes only **outbound** notification calls and (optionally) the self-heartbeat; it needs
+  no inbound reach to anything but its own `POST /ping`.
+
+## The smoke test (what "passes the contract" means)
+
+Boot the impl with a test config (throwaway token, `WATCHER_DISCORD_WEBHOOK` → a local capture server,
+short period/grace), then assert, in order:
+
+1. `GET /healthz` → `200`.
+2. `POST /ping/{wrong}` → `404`; `POST /ping/{token}` → `200`, and the statefile now has a `last_seen`.
+3. Withhold pings past `period + grace` → the capture server receives exactly one **down** message.
+4. `POST /ping/{token}` again → the capture server receives one **recovery** message; `alerted` is now
+   `false`.
+5. (State) After a down page, restart the process → it loads state and does **not** re-page (already
+   alerted); a fresh statefile-less boot pages nothing until first ping.

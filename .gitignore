@@ -1,0 +1,21 @@
+# secrets & local runtime config — never commit (SPEC.md § Configuration is env-only)
+.env
+*.env
+env.local
+
+# runtime statefile(s)
+watcher-state.json
+*.state
+
+# scala-cli / build artifacts
+.scala-build/
+.bsp/
+*.jar
+
+# editor / OS noise
+.idea/
+.vscode/
+.metals/
+.bloop/
+*.swp
+.DS_Store
