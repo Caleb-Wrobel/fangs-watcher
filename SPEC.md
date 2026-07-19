@@ -77,6 +77,7 @@ the contract from day one; wired to a real check at the production cutover.)
 | `WATCHER_PERIOD_SECONDS` | ticker interval / expected check-in cadence | `300` |
 | `WATCHER_GRACE_SECONDS` | forgiveness beyond one period before paging | `900` |
 | `WATCHER_STATE_FILE` | statefile path | `./watcher-state.json` |
+| `WATCHER_BIND` | HTTP listen address | `127.0.0.1` |
 | `WATCHER_PORT` | HTTP listen port | `8080` |
 | `WATCHER_HEALTHCHECK_URL` | healthchecks.io self-heartbeat (optional) | *unset* |
 
@@ -90,6 +91,14 @@ No secret (`WATCHER_TOKEN`, `WATCHER_DISCORD_WEBHOOK`) ever appears in the repo,
   the watcher itself).
 - The watcher makes only **outbound** notification calls and (optionally) the self-heartbeat; it needs
   no inbound reach to anything but its own `POST /ping`.
+- **Bind loopback by default.** In production the watcher runs as one container in a `podman kube play`
+  pod, sharing a network namespace with a **networking sidecar** that owns ingress (and TLS). The
+  sidecar reaches the watcher over `127.0.0.1`, so binding all interfaces would publish `/ping` on the
+  pod IP and bypass the only intended front door. An impl that ignores `WATCHER_BIND` and listens on
+  `0.0.0.0` is **not** conformant — the default must fail closed. `WATCHER_BIND=0.0.0.0` remains
+  available for deployments without a sidecar.
+- `GET /healthz` is loopback-only under that default; this is fine, because the container runtime runs
+  the liveness probe *inside* the pod's network namespace.
 
 ## The smoke test (what "passes the contract" means)
 
