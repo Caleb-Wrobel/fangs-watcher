@@ -1,0 +1,6 @@
+{
+  "language": "Python 3 · Starlette · uvicorn · httpx",
+  "build": ["bash", "bootstrap.sh"],
+  "run": [".venv/bin/python", "-m", "watcher"],
+  "ready_timeout_seconds": 30
+}
