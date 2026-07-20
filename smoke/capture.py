@@ -9,7 +9,7 @@ import json
 import threading
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from time import monotonic
+from time import monotonic, sleep
 
 
 @dataclass
@@ -22,15 +22,49 @@ class Notification:
 
 @dataclass
 class Capture:
-    """Everything the fake outside world has seen."""
+    """Everything the fake outside world has seen — and how it misbehaves.
+
+    The fault knobs let the harness exercise SPEC rule 5 (a notification that
+    fails to send is retried while it still applies), which is otherwise only
+    reachable from inside an implementation's own test suite.
+    """
 
     notifications: list[Notification] = field(default_factory=list)
     heartbeats: list[float] = field(default_factory=list)
+
+    # Fault injection. `attempts` counts every webhook POST that arrived,
+    # including the ones deliberately rejected — the distinction between
+    # "attempted" and "delivered" is exactly what rule 5 turns on.
+    attempts: int = 0
+    fail_webhook: bool = False
+    webhook_delay: float = 0.0
+
     _lock: threading.Lock = field(default_factory=threading.Lock)
 
     def record_notification(self, content: str) -> None:
         with self._lock:
             self.notifications.append(Notification(content, monotonic()))
+
+    def begin_attempt(self) -> tuple[bool, float]:
+        """Register an inbound webhook POST; report how to treat it."""
+        with self._lock:
+            self.attempts += 1
+            return self.fail_webhook, self.webhook_delay
+
+    def attempt_count(self) -> int:
+        with self._lock:
+            return self.attempts
+
+    def inject_failure(self, *, delay: float = 0.0) -> None:
+        """Reject webhook POSTs with a 500, optionally after hanging first."""
+        with self._lock:
+            self.fail_webhook = True
+            self.webhook_delay = delay
+
+    def heal(self) -> None:
+        with self._lock:
+            self.fail_webhook = False
+            self.webhook_delay = 0.0
 
     def record_heartbeat(self) -> None:
         with self._lock:
@@ -51,9 +85,11 @@ class Capture:
             return len(self.heartbeats)
 
     def clear(self) -> None:
+        """Forget what was seen. Deliberately leaves the fault knobs alone."""
         with self._lock:
             self.notifications.clear()
             self.heartbeats.clear()
+            self.attempts = 0
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -65,6 +101,18 @@ class _Handler(BaseHTTPRequestHandler):
             return
         length = int(self.headers.get("Content-Length", 0))
         raw = self.rfile.read(length).decode("utf-8")
+
+        # Read the body first, so a rejected attempt still consumes the request
+        # exactly as a real webhook would.
+        should_fail, delay = self.capture.begin_attempt()
+        if delay:
+            # Hold the connection open, so the harness can slip a ping in while
+            # the watcher is mid-send.
+            sleep(delay)
+        if should_fail:
+            self._respond(500)
+            return
+
         try:
             content = json.loads(raw).get("content", "")
         except json.JSONDecodeError:

@@ -156,6 +156,23 @@ class Watcher:
         finally:
             self.process = None
 
+    def kill(self) -> None:
+        """SIGKILL immediately — no cleanup, no flush, as a power cut would.
+
+        Used to prove the statefile write is atomic; a graceful stop would let
+        the process finish whatever it was writing, which is the opposite of
+        what needs testing.
+        """
+        if self.process is None:
+            return
+        try:
+            os.killpg(os.getpgid(self.process.pid), signal.SIGKILL)
+            self.process.wait(timeout=10)
+        except (ProcessLookupError, subprocess.TimeoutExpired):
+            pass
+        finally:
+            self.process = None
+
     def logs(self) -> str:
         """Drain whatever the process wrote. Only useful after it has exited."""
         if self.process is None or self.process.stdout is None:

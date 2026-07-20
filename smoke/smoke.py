@@ -14,8 +14,10 @@ Standard library only, on purpose: cloning the repo should be enough to run it.
 import argparse
 import json
 import sys
+import threading
 import tempfile
 import time
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -325,6 +327,240 @@ def run_checks(manifest: Manifest, capture: Capture, capture_port: int) -> list[
             return f"silent for {QUIET_WINDOW}s with no statefile"
 
         check("7. fresh install pages nothing (rule 3)", fresh_install_is_silent)
+
+        # ── 8-10. rule 5: a failed notification is retried ────────────────
+        # These need the outside world to misbehave on cue, which is why the
+        # capture server can be told to fail. Each runs against a fresh boot.
+        statefile.unlink(missing_ok=True)
+        capture.clear()
+        capture.heal()
+        faulty = boot()
+        faulty.start()
+        try:
+
+            def failed_page_is_retried() -> str:
+                """A page that never sent must not leave `alerted` true."""
+                capture.inject_failure()
+                if ping(faulty) != 200:
+                    raise CheckFailed("could not arm the watcher")
+
+                wait_until(
+                    lambda: capture.attempt_count() >= 2,
+                    timeout=EXPECT_TIMEOUT + 2 * PERIOD_SECONDS,
+                    what="a down page to be attempted, and then retried",
+                )
+                if capture.down_pages():
+                    raise CheckFailed("the webhook was failing, yet a page was recorded")
+                state = read_state(statefile)
+                if state.get("alerted") is True:
+                    raise CheckFailed(
+                        "alerted=true after a page that never sent — the retry is now "
+                        "suppressed and the outage is lost (SPEC rule 5)"
+                    )
+
+                attempts = capture.attempt_count()
+                capture.heal()
+                wait_until(
+                    lambda: len(capture.down_pages()) >= 1,
+                    timeout=EXPECT_TIMEOUT,
+                    what="the down page to land once the webhook recovers",
+                )
+                return f"retried {attempts}x while failing, then delivered"
+
+            check("8. a failed down page is retried (rule 5)", failed_page_is_retried)
+
+            def failed_recovery_is_retried() -> str:
+                """A recovery that never sent must leave `alerted` true."""
+                wait_until(
+                    lambda: read_state(statefile).get("alerted") is True,
+                    timeout=5,
+                    what="alerted to be true after the delivered page",
+                )
+                capture.inject_failure()
+                before = capture.attempt_count()
+                if ping(faulty) != 200:
+                    raise CheckFailed("ping rejected")
+                wait_until(
+                    lambda: capture.attempt_count() > before,
+                    timeout=10,
+                    what="a recovery notice to be attempted",
+                )
+                time.sleep(1)  # let the impl finish handling the failure
+                if read_state(statefile).get("alerted") is not True:
+                    raise CheckFailed(
+                        "alerted=false after a recovery that never sent — the page is "
+                        "still outstanding to anyone watching (SPEC rule 5)"
+                    )
+
+                capture.heal()
+                if ping(faulty) != 200:
+                    raise CheckFailed("ping rejected")
+                wait_until(
+                    lambda: len(capture.recoveries()) >= 1,
+                    timeout=10,
+                    what="the recovery to land on the next ping",
+                )
+                wait_until(
+                    lambda: read_state(statefile).get("alerted") is False,
+                    timeout=5,
+                    what="alerted to clear once the recovery lands",
+                )
+                return "held the alert until the recovery actually sent"
+
+            check("9. a failed recovery is retried (rule 5)", failed_recovery_is_retried)
+
+            def ping_beats_a_failing_page() -> str:
+                """A check-in during a failing page wins: the subject is alive.
+
+                The webhook is made to hang and then fail, so there is a window
+                in which the watcher is mid-send and a ping can land.
+                """
+                capture.clear()
+                if ping(faulty) != 200:
+                    raise CheckFailed("could not arm the watcher")
+                armed_at = read_state(statefile).get("last_seen")
+
+                hang = 3 * PERIOD_SECONDS
+                capture.inject_failure(delay=hang)
+                wait_until(
+                    lambda: capture.attempt_count() >= 1,
+                    timeout=EXPECT_TIMEOUT,
+                    what="the watcher to start sending a down page",
+                )
+                # It is now blocked in the webhook. Check in.
+                if ping(faulty) != 200:
+                    raise CheckFailed("ping rejected mid-send")
+                capture.heal()
+                time.sleep(hang)
+
+                state = read_state(statefile)
+                if state.get("alerted") is True:
+                    raise CheckFailed(
+                        "alerted=true after a ping landed mid-page — the subject checked "
+                        "in and the page never sent, so the watcher must be disarmed "
+                        "(SPEC rule 5)"
+                    )
+                if state.get("last_seen") == armed_at:
+                    raise CheckFailed(
+                        "the mid-send check-in was rolled back along with the failed "
+                        f"page — last_seen is still {armed_at}, losing a ping the "
+                        "watcher already acknowledged with a 200"
+                    )
+
+                # Keep checking in while we watch. Going quiet here would earn a
+                # perfectly legitimate second page and prove nothing — the point
+                # is that the *failed* page does not resurface for a live subject.
+                # A recovery notice is allowed: the impl may have marked itself
+                # alerted before sending, and announcing the all-clear is honest.
+                deadline = time.monotonic() + QUIET_WINDOW
+                while time.monotonic() < deadline:
+                    if ping(faulty) != 200:
+                        raise CheckFailed("ping rejected while holding the subject alive")
+                    if capture.down_pages():
+                        raise CheckFailed(
+                            f"a down page arrived for a subject that is checking in: "
+                            f"{capture.down_pages()}"
+                        )
+                    time.sleep(PERIOD_SECONDS / 2)
+                return "the check-in won the race; no page for a live subject"
+
+            check("10. a ping during a failing page wins (rule 5)", ping_beats_a_failing_page)
+        finally:
+            faulty.stop()
+            capture.heal()
+
+        # ── 11. the statefile survives being killed mid-write ─────────────
+        def statefile_is_replaced_not_rewritten() -> str:
+            """The statefile must be swapped in by rename, never written in place.
+
+            SPEC § Statefile mandates temp file → fsync → rename. Rename gives
+            the path a *different inode* every time; an in-place write keeps the
+            same one. That makes this a deterministic check rather than a race:
+            killing the process mid-write would only catch a torn file by luck,
+            since the window is well under a millisecond.
+            """
+            statefile.unlink(missing_ok=True)
+            capture.clear()
+            prober = boot()
+            prober.start()
+            try:
+                inodes = []
+                for _ in range(4):
+                    if ping(prober) != 200:
+                        raise CheckFailed("ping rejected")
+                    wait_until(statefile.exists, timeout=5, what="the statefile to appear")
+                    inodes.append(statefile.stat().st_ino)
+                    time.sleep(0.3)
+
+                if len(set(inodes)) == 1:
+                    raise CheckFailed(
+                        f"the statefile kept the same inode ({inodes[0]}) across "
+                        f"{len(inodes)} writes — it is being rewritten in place, so a "
+                        f"crash mid-write can leave a torn file. SPEC § Statefile "
+                        f"requires temp file → fsync → rename."
+                    )
+
+                leftovers = [
+                    p.name
+                    for p in statefile.parent.iterdir()
+                    if p.name != statefile.name
+                ]
+                if leftovers:
+                    raise CheckFailed(f"temp files left beside the statefile: {leftovers}")
+            finally:
+                prober.stop()
+            return f"{len(set(inodes))} distinct inodes across 4 writes — renamed, not rewritten"
+
+        check("11. statefile is replaced atomically", statefile_is_replaced_not_rewritten)
+
+        def statefile_survives_sigkill() -> str:
+            """A supplementary crash test: kill -9 during in-flight writes.
+
+            Weaker than check 11 and probabilistic — a non-atomic writer can pass
+            this by luck — but it exercises the real crash path rather than
+            inferring from inodes, and would catch a writer that renames into
+            place while leaving the *content* incomplete.
+            """
+            statefile.unlink(missing_ok=True)
+            capture.clear()
+            kills = 8
+            for attempt in range(kills):
+                victim = boot()
+                victim.start()
+
+                # Hammer from a thread so the kill lands *during* a write rather
+                # than after a burst has already finished — an idle process has
+                # no torn write to catch.
+                stop = threading.Event()
+
+                def hammer(w: Watcher = victim, stop: threading.Event = stop) -> None:
+                    while not stop.is_set():
+                        with suppress(Exception):  # the process is about to die
+                            ping(w)
+
+                thread = threading.Thread(target=hammer, daemon=True)
+                thread.start()
+                try:
+                    # Stagger, so the kills sample different points in the write.
+                    time.sleep(0.4 + 0.13 * attempt)
+                finally:
+                    victim.kill()
+                    stop.set()
+                    thread.join(timeout=5)
+
+                if not statefile.exists():
+                    continue  # killed before the first write ever landed
+                try:
+                    state = read_state(statefile)
+                except CheckFailed as e:
+                    raise CheckFailed(f"torn statefile after kill #{attempt + 1}: {e}")
+                if set(state) != {"last_seen", "alerted"}:
+                    raise CheckFailed(
+                        f"statefile has the wrong shape after kill #{attempt + 1}: {state}"
+                    )
+            return f"{kills} kills during in-flight writes, statefile intact every time"
+
+        check("12. statefile survives SIGKILL mid-write", statefile_survives_sigkill)
     finally:
         watcher.stop()
 

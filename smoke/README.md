@@ -58,17 +58,39 @@ get wrong and invisible in manual testing:
 - **Restart behaviour**, by actually killing the process mid-outage and booting it again
   against the same statefile (SPEC rule 4), and by booting with no statefile at all (rule 3).
 
+## Fault injection
+
+The capture server can be told to misbehave, which is how rule 5 (a failed notification is retried
+while it still applies) is checked for every language rather than trusted to each impl's own tests:
+
+| Knob | Effect |
+|---|---|
+| `capture.inject_failure()` | webhook POSTs get a `500` |
+| `capture.inject_failure(delay=n)` | hangs `n` seconds first, then fails — opens a window to ping mid-send |
+| `capture.heal()` | back to normal |
+| `capture.attempt_count()` | every POST that arrived, *including* rejected ones |
+
+That last distinction is the whole point: `alerted` must mean a page was **delivered**, not
+attempted. Checks 8–10 cover the three paths — a failed down page, a failed recovery, and a
+check-in that lands while a page is mid-flight.
+
+**The atomic write is checked by inode, not by crashing.** SPEC mandates temp file → fsync →
+rename, and a rename gives the path a new inode every time while an in-place write keeps the same
+one. That is deterministic; killing the process mid-write only catches a torn file by luck, since
+the window is well under a millisecond. Check 12 does kill the process anyway — it exercises the
+real crash path and would catch a writer that renames incomplete *content* — but it is explicitly
+the weaker of the two, and a non-atomic writer can pass it.
+
 ## What it does *not* assert
 
-Two clauses of the contract are left to each impl's own tests, because forcing them from outside
-the process is impractical:
+- **`fsync` itself.** Check 11 proves the rename; it cannot prove the temp file was flushed to
+  disk first. A writer that skips `fsync` survives a process crash (which is all a `kill -9`
+  tests) but can still lose the write in a power cut.
+- **Message wording beyond the prefix and subject.** `{elapsed}` is only checked for presence.
 
-- **Rule 5's retry semantics** — a notification that fails mid-page, and a ping that races a send.
-  The harness cannot make the capture server fail on cue without becoming a mock.
-- **The atomic statefile write** — a crash between the temp write and the rename.
-
-`python/tests/` covers both. An impl that skips them can still pass this suite, so don't read a
-green run as proof they hold.
+Each check was validated against a deliberately broken implementation — bind, re-page-every-tick,
+armed-before-first-ping, the three rule-5 paths, and a non-atomic writer — confirming it fails the
+intended check and only that one.
 - **Process groups are killed, not just the launcher** — a launcher like `scala-cli` spawns a
   JVM child that would otherwise survive and hold the port.
 

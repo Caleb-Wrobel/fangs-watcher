@@ -135,3 +135,15 @@ short period/grace), then assert, in order:
    `false`.
 5. (State) After a down page, restart the process → it loads state and does **not** re-page (already
    alerted); a fresh statefile-less boot pages nothing until first ping.
+6. (Faults — rule 5) With the capture server rejecting webhook POSTs: a down page is **retried** and
+   `alerted` stays `false` until one actually lands; a failed recovery leaves `alerted` `true` until a
+   later ping delivers one. With the capture server *hanging* a POST before failing it, a ping that
+   arrives mid-send wins — the watcher ends disarmed, keeps that check-in, and does not page a live
+   subject.
+7. (Statefile) The path's **inode changes on every write** — proof it was renamed into place rather
+   than rewritten, and the only part of the atomic-write rule observable from outside the process.
+   No temp files are left beside it in normal operation.
+
+The harness deliberately does **not** verify `fsync` (a rename is observable, a flush is not) or the
+exact wording of `{elapsed}`. Implementations should cover those, plus their own concurrency, in
+their own test suites.
