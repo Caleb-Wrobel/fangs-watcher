@@ -1,0 +1,6 @@
+{
+  "language": "Scala 3 · scala-cli · Cask · JDK scheduler",
+  "build": ["scala-cli", "compile", "."],
+  "run": ["scala-cli", "run", "."],
+  "ready_timeout_seconds": 120
+}
