@@ -32,14 +32,27 @@ trait Notifier:
   */
 object Messages:
 
-  /** A duration as an on-call human reads it: `45s`, `18m`, `2h 05m`. */
-  def humanDuration(seconds: Long): String = ???
+  /** A duration as an on-call human reads it: `45s`, `18m`, `2h 05m`.
+    *
+    * Truncated rather than rounded — the reader wants a magnitude, not a
+    * measurement — and deliberately without a day unit: `26h 00m` is quicker to
+    * reason about mid-incident than `1d 2h`.
+    */
+  def humanDuration(seconds: Long): String =
+    // A clock that steps backwards must not render a negative outage.
+    val total = math.max(seconds, 0L)
+    if total < 60 then s"${total}s"
+    else if total < 3600 then s"${total / 60}m"
+    else f"${total / 3600}h ${(total % 3600) / 60}%02dm"
 
   /** `🚨 {subject} is dark — no check-in for {elapsed}. Last check-in: {last_seen}.` */
-  def down(subject: String, elapsedSeconds: Long, lastSeen: Instant): String = ???
+  def down(subject: String, elapsedSeconds: Long, lastSeen: Instant): String =
+    s"🚨 $subject is dark — no check-in for ${humanDuration(elapsedSeconds)}. " +
+      s"Last check-in: $lastSeen."
 
   /** `✅ {subject} is back — check-in resumed at {now}.` */
-  def recovery(subject: String, now: Instant): String = ???
+  def recovery(subject: String, now: Instant): String =
+    s"✅ $subject is back — check-in resumed at $now."
 
 /** Talks to the outside world over blocking HTTP.
   *

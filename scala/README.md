@@ -3,9 +3,11 @@
 An implementation of [`SPEC.md`](../SPEC.md). Scala 3 on scala-cli, Cask for the two routes,
 requests-scala for the two outbound calls, a JDK `ScheduledExecutorService` for the ticker.
 
-> **Status: scaffold.** Every method body is `???` and every test is `.ignore`d. It compiles and the
-> suite is green (57 ignored, 0 run), but it does not yet satisfy the contract — `../smoke/smoke.py
-> scala` fails, by design, until the guts are filled in.
+> **Status: the leaf tier is in.** `Config`, `State` and `Messages` — the three files that depend on
+> nothing else here — are complete, with their suites. `Watcher`, the two routes, `HttpNotifier` and
+> `Main` are still `???` and their tests `.ignore`d. The suite is green (38 run, 27 ignored), but it
+> does not yet satisfy the contract — `../smoke/smoke.py scala` fails, by design, until the rules
+> and the HTTP surface are filled in.
 
 ## Run
 

@@ -15,6 +15,6 @@
 //> using dep com.lihaoyi::upickle:4.4.3
 //> using dep com.lihaoyi::os-lib:0.11.8
 
-//> using test.dep org.scalameta::munit:1.1.1
+//> using test.dep org.scalameta::munit:1.3.4
 
 //> using options -deprecation -feature -unchecked -Wunused:all
