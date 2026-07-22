@@ -29,7 +29,16 @@ object Main:
         // Blocks; Cask owns the main thread from here.
         new WatcherRoutes(config, watcher).main(Array.empty)
 
-  private def buildWatcher(config: Config): Watcher = ???
+  private def buildWatcher(config: Config): Watcher =
+    val notifier = new HttpNotifier(config.discordWebhook, config.healthcheckUrl)
+    // Rule 4: load whatever survived the last run, so a restart mid-outage still
+    // pages on its first tick. An absent or corrupt file loads as fresh.
+    val state = State.load(config.stateFile)
+    System.err.println(
+      s"watching ${config.subject} — listening on ${config.bind}:${config.port}, " +
+        s"state at ${config.stateFile} (dark after ${config.deadlineSeconds}s of silence)"
+    )
+    new Watcher(config, notifier, state)
 
   /** Tick every `period`, forever.
     *
@@ -37,4 +46,26 @@ object Main:
     * from the schedule, which would strand the dead-man's switch answering
     * `/healthz` while never paging again.
     */
-  private def startTicker(config: Config, watcher: Watcher): ScheduledExecutorService = ???
+  private def startTicker(config: Config, watcher: Watcher): ScheduledExecutorService =
+    val scheduler = Executors.newSingleThreadScheduledExecutor { r =>
+      val t = new Thread(r, "watcher-ticker")
+      t.setDaemon(true) // the JVM must not linger on the ticker at shutdown
+      t
+    }
+    // Fixed *delay*, not fixed *rate*: the next tick is scheduled `period` after
+    // the previous one finishes, so a slow webhook that blocks a tick does not
+    // leave `scheduleAtFixedRate` to fire a burst of backlogged ticks the instant
+    // it returns — each of which could send. This matches the Python impl's
+    // `sleep(period)` loop. The mild cadence stretch during a slow send is
+    // harmless: the rule counts wall-clock since `lastSeen`, so a late tick is
+    // still correct.
+    scheduler.scheduleWithFixedDelay(
+      // A belt-and-suspenders guard: onTick already swallows, but a throw that
+      // escaped anyway would silently unschedule the task for good.
+      () => try watcher.onTick()
+      catch case e: Throwable => System.err.println(s"tick failed; continuing: $e"),
+      config.periodSeconds.toLong,
+      config.periodSeconds.toLong,
+      TimeUnit.SECONDS
+    )
+    scheduler

@@ -60,8 +60,49 @@ object Messages:
   * whose period may be only a few seconds.
   */
 final class HttpNotifier(webhookUrl: String, healthcheckUrl: Option[String]) extends Notifier:
+  import HttpNotifier.{ConnectTimeoutMs, ReadTimeoutMs}
 
   /** The URL is never logged: it embeds a credential (SPEC.md § Configuration). */
-  def notify(content: String): Boolean = ???
+  def notify(content: String): Boolean =
+    try
+      val response = requests.post(
+        webhookUrl,
+        data = ujson.write(ujson.Obj("content" -> content)),
+        headers = Map("Content-Type" -> "application/json"),
+        connectTimeout = ConnectTimeoutMs,
+        readTimeout = ReadTimeoutMs,
+        check = false // a webhook's own error is our failure to report, not a throw
+      )
+      if response.is2xx then
+        System.err.println(s"notified: $content")
+        true
+      else
+        // The message, never the URL — the URL is the credential.
+        System.err.println(s"notification failed (HTTP ${response.statusCode}): $content")
+        false
+    catch
+      case e: Throwable =>
+        System.err.println(s"notification failed (${e.getClass.getSimpleName}): $content")
+        false
 
-  def heartbeat(): Boolean = ???
+  /** GET the healthchecks.io check. An unset URL means the feature is off, which
+    * is a success: nothing was meant to happen and nothing failed.
+    */
+  def heartbeat(): Boolean =
+    healthcheckUrl match
+      case None => true
+      case Some(url) =>
+        try
+          requests
+            .get(url, connectTimeout = ConnectTimeoutMs, readTimeout = ReadTimeoutMs, check = false)
+            .is2xx
+        catch
+          case e: Throwable =>
+            System.err.println(s"self-heartbeat failed (${e.getClass.getSimpleName})")
+            false
+
+object HttpNotifier:
+  // Generous enough for a slow webhook, short enough that a black-holed endpoint
+  // cannot wedge a ticker whose period may be only a few seconds.
+  private val ConnectTimeoutMs = 5000
+  private val ReadTimeoutMs = 10000

@@ -65,13 +65,13 @@ class HttpTest extends munit.FunSuite:
     val watcher = new Watcher(config, new FakeNotifier, State())
     withServer(config, watcher)(base => body(base, watcher))
 
-  tmp.test("GET /healthz is 200 while the process is up".ignore) { dir =>
+  tmp.test("GET /healthz is 200 while the process is up") { dir =>
     withWatcher(dir) { (base, _) =>
       assertEquals(requests.get(s"$base/healthz", check = false).statusCode, 200)
     }
   }
 
-  tmp.test("POST /ping/{token} with the right token is 200 and records the check-in".ignore) {
+  tmp.test("POST /ping/{token} with the right token is 200 and records the check-in") {
     dir =>
       withWatcher(dir) { (base, watcher) =>
         assertEquals(requests.post(s"$base/ping/$token", check = false).statusCode, 200)
@@ -80,7 +80,7 @@ class HttpTest extends munit.FunSuite:
       }
   }
 
-  tmp.test("POST /ping/{token} with a wrong token is 404, never 401 or 403".ignore) { dir =>
+  tmp.test("POST /ping/{token} with a wrong token is 404, never 401 or 403") { dir =>
     withWatcher(dir) { (base, watcher) =>
       assertEquals(requests.post(s"$base/ping/not-the-token", check = false).statusCode, 404)
       // A rejected ping is not a check-in: the subject's pulse was not proven.
@@ -88,7 +88,7 @@ class HttpTest extends munit.FunSuite:
     }
   }
 
-  tmp.test("GET /ping/{token} is 404 — indistinguishable from an unknown path".ignore) { dir =>
+  tmp.test("GET /ping/{token} is 404 — indistinguishable from an unknown path") { dir =>
     // A 405 here would confirm the route exists whatever token was tried,
     // defeating the 404-on-mismatch rule as thoroughly as a 401 would.
     withWatcher(dir) { (base, _) =>
@@ -96,13 +96,13 @@ class HttpTest extends munit.FunSuite:
     }
   }
 
-  tmp.test("POST /healthz is 404, not 405".ignore) { dir =>
+  tmp.test("POST /healthz is 404, not 405") { dir =>
     withWatcher(dir) { (base, _) =>
       assertEquals(requests.post(s"$base/healthz", check = false).statusCode, 404)
     }
   }
 
-  tmp.test("an unknown path is 404, byte-identical to a wrong-token ping".ignore) { dir =>
+  tmp.test("an unknown path is 404, byte-identical to a wrong-token ping") { dir =>
     withWatcher(dir) { (base, _) =>
       val unknown = requests.get(s"$base/no-such-route", check = false)
       val wrongToken = requests.post(s"$base/ping/not-the-token", check = false)
@@ -126,7 +126,7 @@ class HttpTest extends munit.FunSuite:
     }
   }
 
-  test("the token comparison is constant-time".ignore) {
+  test("the token comparison is constant-time") {
     // Not a timing measurement — assert the code path uses MessageDigest.isEqual
     // rather than ==. A timing oracle would let the token be guessed a character
     // at a time. Timing this over a loopback socket would measure the scheduler,
@@ -139,7 +139,7 @@ class HttpTest extends munit.FunSuite:
     )
   }
 
-  tmp.test("the ping is durable before the 200 is written".ignore) { dir =>
+  tmp.test("the ping is durable before the 200 is written") { dir =>
     // The 200 is a promise that the check-in survives a crash. A statefile
     // written after the response is a promise the watcher cannot keep.
     withWatcher(dir) { (base, _) =>
@@ -148,7 +148,7 @@ class HttpTest extends munit.FunSuite:
     }
   }
 
-  tmp.test("a slow webhook does not delay the 200 on a check-in".ignore) { dir =>
+  tmp.test("a slow webhook does not delay the 200 on a check-in") { dir =>
     val config = testConfig(dir)
     val notifier = new FakeNotifier
     // Already alerted, so this ping owes a recovery notice — the send that must
@@ -164,7 +164,7 @@ class HttpTest extends munit.FunSuite:
     }
   }
 
-  tmp.test("no response body or log line echoes the token".ignore) { dir =>
+  tmp.test("no response body or log line echoes the token") { dir =>
     // SPEC.md § Configuration: no secret ever appears in a log line, and the
     // token in the path is a bearer credential.
     val guess = "a-guess-at-the-token"

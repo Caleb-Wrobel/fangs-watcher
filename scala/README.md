@@ -3,11 +3,8 @@
 An implementation of [`SPEC.md`](../SPEC.md). Scala 3 on scala-cli, Cask for the two routes,
 requests-scala for the two outbound calls, a JDK `ScheduledExecutorService` for the ticker.
 
-> **Status: the leaf tier is in.** `Config`, `State` and `Messages` — the three files that depend on
-> nothing else here — are complete, with their suites. `Watcher`, the two routes, `HttpNotifier` and
-> `Main` are still `???` and their tests `.ignore`d. The suite is green (38 run, 27 ignored), but it
-> does not yet satisfy the contract — `../smoke/smoke.py scala` fails, by design, until the rules
-> and the HTTP surface are filled in.
+> **Status: complete.** Every method body is implemented and every test runs (66 run, 0 ignored).
+> `../smoke/smoke.py scala` passes all 17 checks — the impl satisfies the contract end to end.
 
 ## Run
 
@@ -31,10 +28,8 @@ scala-cli test .              # the unit suite
 ../smoke/smoke.py scala       # the shared contract suite
 ```
 
-Tests are `.ignore`d while their subject is a stub — drop the `.ignore` as you fill each one in, so
-the ignored count is an honest to-do list. The suite covers what the end-to-end smoke test
-structurally cannot reach: a webhook that fails to send, a ping that lands while a down page is
-mid-flight, and the wording of `{elapsed}`.
+The suite covers what the end-to-end smoke test structurally cannot reach: a webhook that fails to
+send, a ping that lands while a down page is mid-flight, and the wording of `{elapsed}`.
 
 ## Layout
 
@@ -60,11 +55,14 @@ a comparison point rather than a showcase. Blocking calls on Undertow's worker t
 honest shape here.
 
 **The scheduler is `java.util.concurrent`.** SPEC rule 2 is "do this every period", and the JDK
-already says that. `scheduleAtFixedRate` is the right variant: the contract counts elapsed
-wall-clock since `last_seen`, so a late tick is still correct, and fixed-rate keeps the cadence from
-drifting over days of uptime. The tick must never throw — a `ScheduledExecutorService` silently
-stops rescheduling a task that threw, which would strand the watcher answering `/healthz` while
-never paging again.
+already says that. `scheduleWithFixedDelay` is the right variant, not `scheduleAtFixedRate`: the next
+tick is scheduled a period *after* the previous one finishes, so a webhook that blocks a tick for
+several periods does not leave fixed-rate to fire a burst of backlogged ticks the instant it
+returns — each of which could send. This matches the Python impl's `sleep(period)` loop, and the
+mild cadence stretch during a slow send is harmless, since the rule counts wall-clock since
+`last_seen` and a late tick is still correct. The tick must never throw — a
+`ScheduledExecutorService` silently stops rescheduling a task that threw, which would strand the
+watcher answering `/healthz` while never paging again.
 
 **Where the concurrency actually is.** Cask serves each request on an Undertow worker thread while
 the scheduler ticks on its own, so `recordPing` and `onTick` genuinely race. Hold the monitor across
