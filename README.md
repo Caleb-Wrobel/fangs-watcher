@@ -17,7 +17,7 @@ and idiomatic** so they read as clean comparison points — a small polyglot obj
 | Impl | Status | Stack |
 |---|---|---|
 | [`python/`](./python) | ✅ passes the contract | Python 3 · Starlette · uvicorn · httpx · pydantic-settings |
-| `scala/` | planned | Scala 3 · scala-cli · Cask · JDK scheduler |
+| [`scala/`](./scala) | 🚧 scaffold — compiles, guts unimplemented | Scala 3 · scala-cli · Cask · JDK scheduler |
 | `go/` | planned | Go · stdlib |
 
 The shared [**smoke test**](./smoke) validates any implementation against `SPEC.md`:
@@ -44,6 +44,18 @@ WATCHER_PERIOD_SECONDS=10 WATCHER_GRACE_SECONDS=20 \
 
 Secrets (`WATCHER_TOKEN`, `WATCHER_DISCORD_WEBHOOK`) are runtime environment only — never committed.
 See `SPEC.md` for the full contract and the smoke-test definition.
+
+## Develop
+
+```sh
+code fangs-watcher.code-workspace
+```
+
+Each impl is a separate workspace folder with its own interpreter and language-server root, so
+`python/`'s venv is never mistaken for the harness's — adding `scala/` or `go/` means adding a folder
+entry, not reworking the setup. Ships debug configs for the watcher and the smoke harness, plus tasks
+for bootstrap, pytest, ruff, and a standalone webhook sink. Editing the workspace is optional; every
+command it wraps still works from the shell.
 
 ## Deployment
 

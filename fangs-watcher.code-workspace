@@ -1,0 +1,208 @@
+// VS Code workspace for fangs-watcher. Open with: code fangs-watcher.code-workspace
+//
+// This repo is N implementations of one contract (SPEC.md), so each impl is its own
+// workspace folder — its own interpreter, its own toolchain, its own language server
+// root. That keeps python/'s venv from being mistaken for smoke/'s, and leaves room
+// for scala/ and go/ to be added as sibling folders without disturbing either.
+//
+// Committed at the repo root rather than in .vscode/, which .gitignore excludes.
+{
+  "folders": [
+    {
+      // The reference implementation. Its interpreter is python/.venv (./bootstrap.sh).
+      "name": "python",
+      "path": "python",
+      "settings": {
+        "python.defaultInterpreterPath": "${workspaceFolder}/.venv/bin/python",
+        "python.analysis.typeCheckingMode": "standard",
+        "python.testing.pytestEnabled": true,
+        "python.testing.unittestEnabled": false,
+        "python.testing.pytestArgs": ["tests"],
+        "python.testing.cwd": "${workspaceFolder}"
+      }
+    },
+    {
+      // Scaffold. Metals drives this via BSP; scala-cli generates .bsp/ on the
+      // first `scala-cli setup-ide .`, which Metals then picks up automatically.
+      "name": "scala",
+      "path": "scala",
+      "settings": {
+        // Lets AI tools query Metals (compile diagnostics, symbol search, tests)
+        // over MCP. Off by default; also needs enabling on the MCP client side.
+        "metals.startMcpServer": true
+      }
+    },
+    {
+      // The language-agnostic conformance harness. Deliberately stdlib-only and
+      // venv-free — it must run against any impl, so it depends on none of them.
+      "name": "smoke",
+      "path": "smoke",
+      "settings": {
+        // No interpreter pinned: the harness is stdlib-only, so whatever python3 is
+        // on PATH is the right one. Pinning python/.venv here would quietly make the
+        // harness look like it depends on the impl it is supposed to be neutral about.
+        //
+        // smoke.py imports `capture` and `impl` as siblings; because this folder is
+        // its own language-server root, those resolve without any extraPaths.
+        "python.analysis.typeCheckingMode": "basic"
+      }
+    },
+    {
+      // The contract and the docs. python/ and smoke/ are hidden here because they
+      // appear above as folders of their own; without this they'd be listed twice.
+      "name": "repo",
+      "path": ".",
+      "settings": {
+        "files.exclude": {
+          "python": true,
+          "smoke": true
+        }
+      }
+    }
+  ],
+
+  "settings": {
+    "files.exclude": {
+      "**/__pycache__": true,
+      "**/.pytest_cache": true,
+      "**/.ruff_cache": true,
+      "**/.venv": true
+    },
+    "search.exclude": {
+      "**/.venv": true
+    },
+    "files.trimTrailingWhitespace": true,
+    "files.insertFinalNewline": true,
+
+    // Ruff is the formatter and the linter; it reads each folder's own config
+    // (python/pyproject.toml for python/, ruff's defaults for smoke/), which is
+    // exactly what the CLI does today.
+    "[python]": {
+      "editor.defaultFormatter": "charliermarsh.ruff",
+      "editor.formatOnSave": true,
+      "editor.codeActionsOnSave": {
+        "source.organizeImports.ruff": "explicit"
+      },
+      "editor.rulers": [100]
+    },
+    "[markdown]": {
+      // SPEC.md and the READMEs are prose; reflowing them on save would churn diffs.
+      "files.trimTrailingWhitespace": false
+    }
+  },
+
+  "extensions": {
+    "recommendations": [
+      "ms-python.python",
+      "ms-python.vscode-pylance",
+      "ms-python.debugpy",
+      "charliermarsh.ruff",
+      "scalameta.metals"
+      // When go/ lands, add "golang.go" here alongside its folder entry above.
+    ]
+  },
+
+  "launch": {
+    "version": "0.2.0",
+    "configurations": [
+      {
+        // Needs a webhook sink on :9099 — run the "smoke: capture server" task first,
+        // or point WATCHER_DISCORD_WEBHOOK somewhere else. Period/grace are shortened
+        // from the SPEC defaults (300/900) so a silence pages in seconds, not minutes.
+        "name": "watcher: run (python)",
+        "type": "debugpy",
+        "request": "launch",
+        "module": "watcher",
+        "cwd": "${workspaceFolder:python}",
+        "python": "${workspaceFolder:python}/.venv/bin/python",
+        "console": "integratedTerminal",
+        "env": {
+          "WATCHER_TOKEN": "dev-token",
+          "WATCHER_DISCORD_WEBHOOK": "http://localhost:9099/hook",
+          "WATCHER_SUBJECT": "limen",
+          "WATCHER_PERIOD_SECONDS": "10",
+          "WATCHER_GRACE_SECONDS": "20",
+          "WATCHER_STATE_FILE": "${workspaceFolder:python}/watcher-state.json"
+        }
+      },
+      {
+        "name": "smoke: all impls",
+        "type": "debugpy",
+        "request": "launch",
+        "program": "${workspaceFolder:smoke}/smoke.py",
+        "cwd": "${workspaceFolder:repo}",
+        "console": "integratedTerminal"
+      },
+      {
+        "name": "smoke: python only",
+        "type": "debugpy",
+        "request": "launch",
+        "program": "${workspaceFolder:smoke}/smoke.py",
+        "args": ["python"],
+        "cwd": "${workspaceFolder:repo}",
+        "console": "integratedTerminal"
+      }
+    ]
+  },
+
+  "tasks": {
+    "version": "2.0.0",
+    "tasks": [
+      {
+        "label": "python: bootstrap venv",
+        "type": "shell",
+        "command": "./bootstrap.sh && .venv/bin/pip install -r requirements-dev.txt",
+        "options": { "cwd": "${workspaceFolder:python}" },
+        "problemMatcher": []
+      },
+      {
+        "label": "python: pytest",
+        "type": "shell",
+        "command": "${workspaceFolder:python}/.venv/bin/pytest -q",
+        "options": { "cwd": "${workspaceFolder:python}" },
+        "group": "test",
+        "problemMatcher": []
+      },
+      {
+        "label": "python: ruff check",
+        "type": "shell",
+        "command": "${workspaceFolder:python}/.venv/bin/ruff check .",
+        "options": { "cwd": "${workspaceFolder:python}" },
+        "problemMatcher": []
+      },
+      {
+        "label": "scala: test",
+        "type": "shell",
+        "command": "scala-cli test .",
+        "options": { "cwd": "${workspaceFolder:scala}" },
+        "group": "test",
+        "problemMatcher": []
+      },
+      {
+        // Regenerates .bsp/ so Metals can import the project.
+        "label": "scala: setup-ide",
+        "type": "shell",
+        "command": "scala-cli setup-ide .",
+        "options": { "cwd": "${workspaceFolder:scala}" },
+        "problemMatcher": []
+      },
+      {
+        "label": "smoke: all impls",
+        "type": "shell",
+        "command": "./smoke/smoke.py",
+        "options": { "cwd": "${workspaceFolder:repo}" },
+        "group": { "kind": "test", "isDefault": true },
+        "problemMatcher": []
+      },
+      {
+        // Standalone webhook sink for the "watcher: run (python)" launch config.
+        "label": "smoke: capture server",
+        "type": "shell",
+        "command": "${workspaceFolder:python}/.venv/bin/python -c \"import threading, capture; cap, srv = capture.start_capture_server(9099); print('capture listening on :9099'); threading.Event().wait()\"",
+        "options": { "cwd": "${workspaceFolder:smoke}" },
+        "isBackground": true,
+        "problemMatcher": []
+      }
+    ]
+  }
+}
