@@ -18,6 +18,12 @@ on:
   release:
     types: [published]
 
+# One publish in flight per ref: two quick pushes to main must not race to
+# clobber :edge. Cancel the older run.
+concurrency:
+  group: watcher-scala-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   publish:
     runs-on: ubuntu-24.04
@@ -75,7 +81,12 @@ jobs:
           image="ghcr.io/$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')/watcher-scala"
           if [ "${{ github.event_name }}" = "release" ]; then
             v="${{ github.ref_name }}"; v="${v#v}"
-            tags="$image:$v $image:latest"
+            tags="$image:$v"
+            # :latest only tracks real releases — a prerelease (vX.Y.Z-rc1) must
+            # not move the tag fangs would otherwise trust.
+            if [ "${{ github.event.release.prerelease }}" != "true" ]; then
+              tags="$tags $image:latest"
+            fi
           else
             tags="$image:edge $image:sha-${GITHUB_SHA::12}"
           fi
