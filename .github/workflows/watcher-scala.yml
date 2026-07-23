@@ -1,0 +1,95 @@
+# Publish the Scala watcher image to GHCR — gated on the SPEC.md contract.
+#
+# Strategy (see ../../PUBLISHING.md):
+#   pull_request  -> build + smoke, NEVER push
+#   push (main)   -> :edge and :sha-<12>
+#   release (vX)  -> :X.Y.Z and :latest   (the tags fangs pins in production)
+#
+# amd64 only — the embassy box is the x86 Oracle E2.1.Micro, so ubuntu-24.04
+# (x86) runners are arch-matched and no native-image cross-compile ever applies.
+name: watcher-scala
+
+on:
+  pull_request:
+    paths: ['scala/**', 'smoke/**', 'SPEC.md', '.github/workflows/watcher-scala.yml']
+  push:
+    branches: [main]
+    paths: ['scala/**', 'smoke/**', 'SPEC.md', '.github/workflows/watcher-scala.yml']
+  release:
+    types: [published]
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write          # GHCR push via the built-in GITHUB_TOKEN — no PAT
+    steps:
+      - uses: actions/checkout@v4
+
+      # --- Gate 1: the code passes the contract (full suite, dev path) --------
+      - uses: VirtusLab/scala-cli-setup@v1
+        with:
+          jvm: temurin:21
+      - name: Contract smoke (dev path)
+        run: ./smoke/smoke.py scala
+
+      # --- Build the actual artifact -----------------------------------------
+      - name: Build image
+        run: podman build -t watcher:ci scala
+
+      # --- Gate 2: the built image boots and serves SPEC's routes ------------
+      - name: Boot-and-ping the image
+        run: |
+          set -euo pipefail
+          TOKEN="ci-$(openssl rand -hex 8)"
+          # WATCHER_BIND=0.0.0.0 is a CI-only override so the check can reach the
+          # process across podman's port mapping. Production binds loopback and
+          # fronts the watcher with a sidecar (SPEC § Security) — this is not the
+          # deployed posture.
+          podman run -d --name w \
+            -e WATCHER_TOKEN="$TOKEN" \
+            -e WATCHER_DISCORD_WEBHOOK=http://127.0.0.1:9099/hook \
+            -e WATCHER_SUBJECT=ci \
+            -e WATCHER_BIND=0.0.0.0 \
+            -e WATCHER_PORT=8080 \
+            -p 127.0.0.1:8080:8080 \
+            watcher:ci
+          for _ in $(seq 1 30); do
+            curl -sf http://127.0.0.1:8080/healthz && break || sleep 2
+          done
+          code() { curl -s -o /dev/null -w '%{http_code}' "$@"; }
+          curl -sf http://127.0.0.1:8080/healthz > /dev/null
+          test "$(code -X POST http://127.0.0.1:8080/ping/wrong)"    = 404  # mismatch hidden
+          test "$(code -X POST http://127.0.0.1:8080/ping/$TOKEN)"   = 200  # accepted ping
+          test "$(code       http://127.0.0.1:8080/ping/$TOKEN)"     = 404  # GET = method-mismatch hidden
+          podman logs w || true
+          podman rm -f w
+
+      # --- Publish (skipped on pull_request) ---------------------------------
+      - name: Compute image + tags
+        if: github.event_name != 'pull_request'
+        id: meta
+        run: |
+          set -euo pipefail
+          image="ghcr.io/$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')/watcher-scala"
+          if [ "${{ github.event_name }}" = "release" ]; then
+            v="${{ github.ref_name }}"; v="${v#v}"
+            tags="$image:$v $image:latest"
+          else
+            tags="$image:edge $image:sha-${GITHUB_SHA::12}"
+          fi
+          echo "tags=$tags" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | podman login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Push
+        if: github.event_name != 'pull_request'
+        run: |
+          set -euo pipefail
+          for t in ${{ steps.meta.outputs.tags }}; do
+            podman tag watcher:ci "$t"
+            podman push "$t"
+          done

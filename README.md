@@ -61,7 +61,8 @@ command it wraps still works from the shell.
 
 The image is deployed by the [fangs](https://github.com/) config repo as a rootless Podman Quadlet on
 the watcher host — this repo produces the image; fangs composes it. This repo knows nothing about the
-host, TLS, or the fleet.
+host, TLS, or the fleet. **How this repo builds and publishes those images — GHCR, tagging, the CI
+gate — is [`PUBLISHING.md`](./PUBLISHING.md).**
 
 In production the watcher runs as one container in a `podman kube play` pod, sharing a network
 namespace with a **networking sidecar** that owns ingress and TLS. The sidecar reaches the watcher
