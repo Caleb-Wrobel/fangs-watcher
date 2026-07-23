@@ -1,9 +1,14 @@
 # Publish the Scala watcher image to GHCR — gated on the SPEC.md contract.
 #
 # Strategy (see ../../PUBLISHING.md):
-#   pull_request  -> build + smoke, NEVER push
-#   push (main)   -> :edge and :sha-<12>
-#   release (vX)  -> :X.Y.Z and :latest   (the tags fangs pins in production)
+#   pull_request        -> build + smoke, NEVER push
+#   push (main)         -> :edge and :sha-<12>
+#   release (scala-vX)  -> :X.Y.Z and :latest   (the tags fangs pins in production)
+#
+# Per-impl release tags: this repo ships N impls of one contract, so each tongue
+# versions independently — Scala releases are tagged `scala-vX.Y.Z`, Go will be
+# `go-vX.Y.Z`. The `release` event can't glob tags in `on:`, so the job below
+# gates on the prefix; a `go-v*` release just triggers a cheap skipped job here.
 #
 # amd64 only — the embassy box is the x86 Oracle E2.1.Micro, so ubuntu-24.04
 # (x86) runners are arch-matched and no native-image cross-compile ever applies.
@@ -27,6 +32,11 @@ concurrency:
 jobs:
   publish:
     runs-on: ubuntu-24.04
+    # Run for every push/PR; for a release, only the Scala impl's own tag prefix.
+    # A `go-v*` (or any non-`scala-v*`) release is not this workflow's business.
+    if: >-
+      github.event_name != 'release' ||
+      startsWith(github.event.release.tag_name, 'scala-v')
     permissions:
       contents: read
       packages: write          # GHCR push via the built-in GITHUB_TOKEN — no PAT
@@ -80,7 +90,8 @@ jobs:
           set -euo pipefail
           image="ghcr.io/$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')/watcher-scala"
           if [ "${{ github.event_name }}" = "release" ]; then
-            v="${{ github.ref_name }}"; v="${v#v}"
+            # tag is scala-vX.Y.Z -> image tag X.Y.Z
+            v="${{ github.ref_name }}"; v="${v#scala-v}"
             tags="$image:$v"
             # :latest only tracks real releases — a prerelease (vX.Y.Z-rc1) must
             # not move the tag fangs would otherwise trust.
