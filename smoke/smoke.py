@@ -339,11 +339,21 @@ def run_checks(manifest: Manifest, capture: Capture, capture_port: int) -> list[
         try:
 
             def failed_page_is_retried() -> str:
-                """A page that never sent must not leave `alerted` true."""
+                """A page that never sent must not silence the retry: the impl
+                keeps attempting until the webhook recovers."""
                 capture.inject_failure()
                 if ping(faulty) != 200:
                     raise CheckFailed("could not arm the watcher")
 
+                # Proof the retry is NOT suppressed: attempts keep climbing while
+                # the webhook fails. A wrongly-latched alerted=true would stop at
+                # one attempt and time this wait out. We deliberately do NOT read
+                # the alerted flag here — mid-attempt it is transiently true by
+                # SPEC's own leave (mark before send, roll back on failure), and
+                # sampling that instant races the rollback's fsync. A GC pause
+                # widens the window: flaky on the JVM, worse under native-image's
+                # serial GC. Assert on latched, monotonic facts (attempts +
+                # delivery), never on the instantaneous value of the flag.
                 wait_until(
                     lambda: capture.attempt_count() >= 2,
                     timeout=EXPECT_TIMEOUT + 2 * PERIOD_SECONDS,
@@ -351,12 +361,6 @@ def run_checks(manifest: Manifest, capture: Capture, capture_port: int) -> list[
                 )
                 if capture.down_pages():
                     raise CheckFailed("the webhook was failing, yet a page was recorded")
-                state = read_state(statefile)
-                if state.get("alerted") is True:
-                    raise CheckFailed(
-                        "alerted=true after a page that never sent — the retry is now "
-                        "suppressed and the outage is lost (SPEC rule 5)"
-                    )
 
                 attempts = capture.attempt_count()
                 capture.heal()
@@ -385,11 +389,21 @@ def run_checks(manifest: Manifest, capture: Capture, capture_port: int) -> list[
                     timeout=10,
                     what="a recovery notice to be attempted",
                 )
-                time.sleep(1)  # let the impl finish handling the failure
-                if read_state(statefile).get("alerted") is not True:
+                # The re-arm is asynchronous (the ping's 200 must not wait on the
+                # webhook), so wait for alerted to CONVERGE back to true rather
+                # than sampling it once after a fixed sleep — that sample races the
+                # clear->send->re-arm window, which a GC pause widens (flaky on the
+                # JVM, worse under native-image). The latched fact that matters:
+                # no recovery is ever delivered while the webhook is failing.
+                wait_until(
+                    lambda: read_state(statefile).get("alerted") is True,
+                    timeout=EXPECT_TIMEOUT,
+                    what="alerted to be re-armed after the recovery failed to send",
+                )
+                if capture.recoveries():
                     raise CheckFailed(
-                        "alerted=false after a recovery that never sent — the page is "
-                        "still outstanding to anyone watching (SPEC rule 5)"
+                        "a recovery was recorded as delivered while the webhook was "
+                        "failing — the page is not really outstanding (SPEC rule 5)"
                     )
 
                 capture.heal()
