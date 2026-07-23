@@ -31,7 +31,7 @@ jobs:
       contents: read
       packages: write          # GHCR push via the built-in GITHUB_TOKEN — no PAT
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # --- Gate 1: the code passes the contract (full suite, dev path) --------
       - uses: VirtusLab/scala-cli-setup@v1
