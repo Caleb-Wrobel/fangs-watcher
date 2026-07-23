@@ -1,0 +1,41 @@
+# fangs-watcher — Scala impl image.
+#
+# Two stages so the runtime image carries a JRE and one jar, not the whole
+# scala-cli/JDK build toolchain. The shape (build an artifact, then COPY it onto
+# a minimal runtime + ENTRYPOINT) is deliberately the same one the Go impl will
+# use with a static binary — the publication layer stays uniform across tongues.
+#
+# Build locally the same way CI does:
+#   podman build -t watcher-scala:dev scala
+#
+# Pin both bases before this is anything but dev — :latest is not reproducible.
+
+# ---- build: assemble a self-contained jar -----------------------------------
+FROM docker.io/virtuslab/scala-cli:1.5.4 AS build
+WORKDIR /src
+COPY . .
+# --assembly = one runnable fat jar; --main-class is explicit so the build never
+# depends on main-class autodetection. package needs --power on current scala-cli.
+# --server=false disables the Bloop build daemon: inside a build sandbox its BSP
+# socket cannot start reliably, so compile in-process instead.
+RUN scala-cli --power package . \
+      --assembly \
+      --main-class watcher.Main \
+      --output /watcher.jar \
+      --server=false \
+      --force
+
+# ---- runtime: JRE + the jar, nothing else -----------------------------------
+FROM docker.io/library/eclipse-temurin:21-jre-noble
+# Unprivileged, matches the rootless-Podman posture; uid is fixed so a bind-mounted
+# statefile volume can be chowned to it from the fangs Quadlet if ever needed.
+RUN useradd --system --uid 10001 --create-home --home-dir /var/lib/watcher watcher
+WORKDIR /var/lib/watcher
+USER watcher
+COPY --from=build /watcher.jar /app/watcher.jar
+
+# Documentation only (the sidecar owns ingress; SPEC defaults WATCHER_BIND=127.0.0.1).
+EXPOSE 8080
+
+# All config is WATCHER_* environment (SPEC § Configuration). No secrets baked in.
+ENTRYPOINT ["java", "-jar", "/app/watcher.jar"]
