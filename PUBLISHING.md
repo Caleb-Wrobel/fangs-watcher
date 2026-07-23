@@ -38,11 +38,21 @@ one process.
 |---|---|---|---|
 | `pull_request` | ✅ | ✅ | ❌ — never |
 | push to `main` | ✅ | ✅ | `:edge`, `:sha-<12>` |
-| release `vX.Y.Z` | ✅ | ✅ | `:X.Y.Z`, `:latest` |
+| release `scala-vX.Y.Z` | ✅ | ✅ | `:X.Y.Z`, `:latest` (latest skipped on prereleases) |
+
+**Per-impl versioning.** N impls of one contract means each tongue versions on its own line, so a
+Scala fix never bumps Go's number. Releases are tagged **`scala-vX.Y.Z`** (Go will be `go-vX.Y.Z`);
+the image tag drops the prefix (`scala-v0.1.0` → `watcher-scala:0.1.0`). A release whose tag isn't
+`scala-v*` triggers a cheap skipped job here, nothing more.
+
+**Start at `0.1.0`, not `1.0.0`.** The watcher passes the contract and publishes, but hasn't watched
+anything in production (no limen cutover, no TLS). `0.x` = works, surface may still move; reserve
+`1.0.0` for after the production cutover proves it as the real dead-man's switch.
 
 **fangs pins an immutable tag** — a specific `:X.Y.Z` (or a `@sha256:` digest) in the Quadlet, never
-`:edge`/`:latest`. Cutting a release is therefore the deploy signal: tag `vX.Y.Z` here, bump the pin
-there.
+`:edge`/`:latest`. Cutting a release is therefore the deploy signal: tag `scala-vX.Y.Z` here, bump
+the pin there. The Containerfile's base images are digest-pinned, so a rebuilt release tag is
+byte-reproducible.
 
 ## The publish gate — nothing ships that failed SPEC.md
 

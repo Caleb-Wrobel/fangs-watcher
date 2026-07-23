@@ -8,10 +8,13 @@
 # Build locally the same way CI does:
 #   podman build -t watcher-scala:dev scala
 #
-# Pin both bases before this is anything but dev — :latest is not reproducible.
+# Bases are digest-pinned so a rebuilt tag is byte-reproducible; the human tag is
+# kept alongside for readability. Re-pin on a deliberate bump: resolve the new
+# digest (`podman pull <ref>` → RepoDigests, or the registry Docker-Content-Digest
+# header) and update both the tag and the @sha256 here in one commit.
 
 # ---- build: assemble a self-contained jar -----------------------------------
-FROM docker.io/virtuslab/scala-cli:1.5.4 AS build
+FROM docker.io/virtuslab/scala-cli:1.5.4@sha256:b11fc2a26fa52758ec9cdc94394b3d0c83a49591839d076cd31ba541a5932b97 AS build
 WORKDIR /src
 COPY . .
 # --assembly = one runnable fat jar; --main-class is explicit so the build never
@@ -26,7 +29,7 @@ RUN scala-cli --power package . \
       --force
 
 # ---- runtime: JRE + the jar, nothing else -----------------------------------
-FROM docker.io/library/eclipse-temurin:21-jre-noble
+FROM docker.io/library/eclipse-temurin:21-jre-noble@sha256:373787d1d45a87f084fda43e7de0e9acf5eedee049446efac738f13587ec4c64
 # Unprivileged, matches the rootless-Podman posture; uid is fixed so a bind-mounted
 # statefile volume can be chowned to it from the fangs Quadlet if ever needed.
 RUN useradd --system --uid 10001 --create-home --home-dir /var/lib/watcher watcher
