@@ -1,0 +1,10 @@
+# Podman/Docker honor this, not .gitignore. Keep host build/editor state out of
+# the build context so `COPY . .` never drags a locally-compiled .scala-build
+# (a possibly different scala-cli/JDK) into the in-container compile — CI checks
+# out clean, but the documented `podman build … scala` runs from a working tree.
+.scala-build/
+.bsp/
+.metals/
+.bloop/
+target/
+*.jar
