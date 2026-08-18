@@ -1,0 +1,6 @@
+{
+  "language": "Go 1.26 · net/http · fixed-delay ticker",
+  "build": ["go", "build", "-o", "bin/watcher", "./cmd/watcher"],
+  "run": ["./bin/watcher"],
+  "ready_timeout_seconds": 10
+}
