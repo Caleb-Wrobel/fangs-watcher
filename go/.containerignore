@@ -1,0 +1,3 @@
+# Local build output — the image builds its own binary in the build stage, and
+# a host-built one would be the wrong arch for a cross-compiled target.
+bin/

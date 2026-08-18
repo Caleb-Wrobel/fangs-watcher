@@ -1,0 +1,48 @@
+# fangs-watcher — Go impl image.
+#
+# Two stages, same shape as scala/Containerfile: build an artifact, COPY it onto
+# a minimal runtime. A static Go binary needs no libc, so the runtime here is
+# distroless rather than a JRE.
+#
+#   podman build -t watcher-go:dev go                                        # host arch
+#   podman build --platform linux/amd64,linux/arm64 --manifest watcher-go:dev go
+#
+# Bases are digest-pinned so a rebuilt tag is byte-reproducible. These are
+# manifest-list digests, so one pin covers both arches; re-pin tag and @sha256
+# together.
+
+# ---- build: cross-compile a static binary -----------------------------------
+# Pinned to the runner's arch; Go cross-compiles to $TARGETARCH. No QEMU here.
+FROM --platform=$BUILDPLATFORM docker.io/library/golang:1.26-trixie@sha256:b75d466dd608587fd66cca705a307ba65b889827d06ad61d6a75f0482b51b7c7 AS build
+
+ARG TARGETOS
+ARG TARGETARCH
+
+WORKDIR /src
+COPY . .
+
+# CGO_ENABLED=0 makes the binary static, which is what allows a distroless base:
+# net's cgo resolver would otherwise link the builder's glibc. -trimpath and an
+# emptied -buildid make the output reproducible; -s -w drop symbols and DWARF.
+RUN CGO_ENABLED=0 GOOS="${TARGETOS}" GOARCH="${TARGETARCH}" \
+    go build -trimpath -ldflags='-s -w -buildid=' -o /out/watcher ./cmd/watcher
+
+# No shell in the runtime image, so the statefile dir is made here.
+RUN mkdir -p /out/var/lib/watcher
+
+# ---- runtime: the binary, and nothing else ----------------------------------
+FROM gcr.io/distroless/static-debian13:nonroot@sha256:f7f8f729987ad0fdf6b05eeeae94b26e6a0f613bdf46feea7fc40f7bd72953e6
+
+# uid 65532 (`nonroot`). A bind-mounted statefile dir must be chowned to it —
+# the Scala image uses 10001, so chown to the uid of the image you pinned.
+COPY --from=build --chown=65532:65532 /out/var/lib/watcher /var/lib/watcher
+COPY --from=build /out/watcher /app/watcher
+
+WORKDIR /var/lib/watcher
+USER 65532:65532
+
+# Documentation only; the sidecar owns ingress, SPEC defaults BIND=127.0.0.1.
+EXPOSE 8080
+
+# All config is WATCHER_* env (SPEC § Configuration). No secrets baked in.
+ENTRYPOINT ["/app/watcher"]

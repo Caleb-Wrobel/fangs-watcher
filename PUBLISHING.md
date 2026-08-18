@@ -9,8 +9,8 @@ host, TLS, the pod, or the fleet — it produces a versioned image per impl and 
 **GHCR**, one image per impl, named for the impl:
 
 ```
-ghcr.io/caleb-wrobel/fangs-watcher/watcher-scala
-ghcr.io/caleb-wrobel/fangs-watcher/watcher-go      # when it lands
+ghcr.io/caleb-wrobel/fangs-watcher/watcher-scala   # linux/amd64
+ghcr.io/caleb-wrobel/fangs-watcher/watcher-go      # linux/amd64 + linux/arm64
 ```
 
 The repo is **public**, which buys two free things that shape everything below: GitHub's free
@@ -18,12 +18,28 @@ runners, and **anonymous image pulls**. The embassy box pulls its image at deplo
 credential and no WireGuard* — which is exactly the charter's runtime-independence rule (an image
 pulled at deploy sits locally afterward; the watcher keeps watching with the fleet dark).
 
-## Architecture: amd64 only
+## Architecture: per impl — Go ships two, Scala ships one
 
-The box is the Oracle **x86 E2.1.Micro**, so images are `linux/amd64` and CI runs on the default
-`ubuntu-24.04` (x86) runners — arch-matched, no multi-arch matrix, and no native-image
-cross-compile problem to ever solve. (morel, the fleet's amd64 host, is the arch-matched fallback
-builder if runners are ever wanted; auxin arm64 cannot build for an x86 box.)
+The box is moving from the Oracle **x86 E2.1.Micro** to arm64, and may move back, so the arch story
+is per impl now rather than repo-wide.
+
+**Go publishes a two-arch manifest** (`linux/amd64` + `linux/arm64`) under one tag: the host pulls
+whichever it needs, and an arch switch costs a `podman pull` rather than a rebuild or a re-pin. It
+is close to free — the build stage runs on the runner's own arch (`--platform=$BUILDPLATFORM`) and
+Go cross-compiles to the target, so no QEMU sits in the build path. Emulation is registered only to
+*boot-test* the arm64 artifact, a few seconds per run.
+
+**Scala stays `linux/amd64`.** Cross-compiling the JVM image would be easy enough, but native-image
+(below) is the chapter that genuinely cannot cross-compile, and there is no reason to grow a second
+arch for it before that question is answered. If the box moves to arm64 it simply runs the Go image
+— the impls are substitutable by construction: same contract, same statefile format, same `WATCHER_*`
+environment, same routes. Which tongue the box runs is a deploy-time choice about arch and taste,
+not a port. That is what having N impls of one contract buys, and the arch split is the first time
+the repo actually spends it.
+
+CI runs on the default `ubuntu-24.04` (x86) runners either way. (morel, the fleet's amd64 host,
+remains the arch-matched fallback builder if runners are ever wanted; auxin arm64 cannot build for
+an x86 box — though a cross-compiling Go build no longer cares either way.)
 
 ## JVM first; native-image is a later chapter
 
@@ -39,11 +55,19 @@ one process.
 | `pull_request` | ✅ | ✅ | ❌ — never |
 | push to `main` | ✅ | ✅ | `:edge`, `:sha-<12>` |
 | release `scala-vX.Y.Z` | ✅ | ✅ | `:X.Y.Z`, `:latest` (latest skipped on prereleases) |
+| release `go-vX.Y.Z` | ✅ | ✅ | `:X.Y.Z`, `:latest` (latest skipped on prereleases) |
 
 **Per-impl versioning.** N impls of one contract means each tongue versions on its own line, so a
-Scala fix never bumps Go's number. Releases are tagged **`scala-vX.Y.Z`** (Go will be `go-vX.Y.Z`);
-the image tag drops the prefix (`scala-v0.1.0` → `watcher-scala:0.1.0`). A release whose tag isn't
-`scala-v*` triggers a cheap skipped job here, nothing more.
+Scala fix never bumps Go's number. Releases are tagged **`scala-vX.Y.Z`** and **`go-vX.Y.Z`**; the
+image tag drops the prefix (`scala-v0.1.0` → `watcher-scala:0.1.0`). A release whose tag doesn't
+match a workflow's prefix triggers a cheap skipped job there, nothing more.
+
+Because the impls are substitutable, a single `watcher:latest` fronting whichever backend suits the
+host would also be honest — the contract is the interface, and fangs would stop caring which tongue
+it pulled. The reason it isn't that today is the pinning rule below: one name spanning backends means
+a tag bump can change *runtime* as well as version, so the thing fangs pins would no longer identify
+what it runs. Worth doing deliberately, with the impl in the tag (`watcher:0.1.0-go`) rather than by
+collapsing the names.
 
 **Start at `0.1.0`, not `1.0.0`.** The watcher passes the contract and publishes, but hasn't watched
 anything in production (no limen cutover, no TLS). `0.x` = works, surface may still move; reserve
@@ -89,3 +113,16 @@ podman run --rm \
   -e WATCHER_SUBJECT=limen -e WATCHER_BIND=0.0.0.0 -p 127.0.0.1:8080:8080 \
   watcher-scala:dev
 ```
+
+Go is the same, with `go` for `scala`. For both arches at once — what CI publishes — build a
+manifest list instead of an image, and pick one to run with `--arch`:
+
+```sh
+podman build --platform linux/amd64,linux/arm64 --manifest watcher-go:dev go
+podman run --rm --arch arm64 ... watcher-go:dev
+```
+
+Running the non-native arch needs binfmt handlers registered on the host
+(`podman run --rm --privileged docker.io/tonistiigi/binfmt --install arm64`); building does not,
+since the Go build stage cross-compiles. See [`go/README.md`](./go/README.md) for operating the Go
+image — env, statefile, upgrade and rollback.
