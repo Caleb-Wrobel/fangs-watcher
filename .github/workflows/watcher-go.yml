@@ -1,0 +1,156 @@
+# Publish the Go watcher image to GHCR — gated on the SPEC.md contract.
+#
+# Strategy (see ../../PUBLISHING.md):
+#   pull_request     -> build + smoke, NEVER push
+#   push (main)      -> :edge and :sha-<12>
+#   release (go-vX)  -> :X.Y.Z and :latest
+#
+# Per-impl release tags: Go releases are `go-vX.Y.Z`, Scala's are `scala-vX.Y.Z`.
+# The `release` event can't glob tags in `on:`, so the job gates on the prefix.
+#
+# Two arches, unlike watcher-scala: the box is moving to arm64 and may move back,
+# so one tag carries a linux/amd64 + linux/arm64 manifest list. It is cheap —
+# the build stage runs on the runner's arch and Go cross-compiles, so QEMU is
+# only needed to boot-test the arm64 artifact.
+name: watcher-go
+
+on:
+  pull_request:
+    paths: ['go/**', 'smoke/**', 'SPEC.md', '.github/workflows/watcher-go.yml']
+  push:
+    branches: [main]
+    paths: ['go/**', 'smoke/**', 'SPEC.md', '.github/workflows/watcher-go.yml']
+  release:
+    types: [published]
+
+# One publish in flight per ref, so two quick pushes can't race to clobber :edge.
+concurrency:
+  group: watcher-go-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PLATFORMS: linux/amd64,linux/arm64
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    # Every push/PR; for a release, only Go's own tag prefix.
+    if: >-
+      github.event_name != 'release' ||
+      startsWith(github.event.release.tag_name, 'go-v')
+    permissions:
+      contents: read
+      packages: write          # GHCR push via the built-in GITHUB_TOKEN — no PAT
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go/go.mod
+          cache: false          # stdlib-only: no go.sum to key a cache on
+
+      # --- Gate 0: unit suite, vet, formatting -------------------------------
+      # The unit suite reaches what an end-to-end run cannot (a webhook failing
+      # mid-page, a ping racing a send); -race is the point of running it in CI.
+      - name: Vet, format, and unit tests
+        working-directory: go
+        run: |
+          set -euo pipefail
+          test -z "$(gofmt -l .)" || { echo "gofmt needed:"; gofmt -l .; exit 1; }
+          go vet ./...
+          go test -race ./...
+
+      # --- Gate 1: the code passes the contract ------------------------------
+      - name: Contract smoke (dev path)
+        run: ./smoke/smoke.py go
+
+      # --- Build both arches -------------------------------------------------
+      # binfmt is for the boot check below; the build itself cross-compiles.
+      - name: Register binfmt handlers (for the arm64 boot check)
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - name: Build image (multi-arch manifest)
+        run: podman build --platform "$PLATFORMS" --manifest watcher:ci go
+
+      # --- Gate 2: every published arch boots and serves SPEC's routes -------
+      - name: Boot-and-ping the image (each arch)
+        run: |
+          set -euo pipefail
+          code() { curl -s -o /dev/null -w '%{http_code}' "$@"; }
+
+          check_arch() {
+            arch="$1"
+            port="$2"
+            token="ci-$(openssl rand -hex 8)"
+            echo "── $arch ────────────────────────────────────────────────"
+            # WATCHER_BIND=0.0.0.0 is a CI-only override so the check can reach
+            # the process across the port mapping. Production binds loopback
+            # behind a sidecar (SPEC § Security).
+            podman run -d --name "w-$arch" --arch "$arch" \
+              -e WATCHER_TOKEN="$token" \
+              -e WATCHER_DISCORD_WEBHOOK=http://127.0.0.1:9099/hook \
+              -e WATCHER_SUBJECT=ci \
+              -e WATCHER_BIND=0.0.0.0 \
+              -e WATCHER_PORT=8080 \
+              -p "127.0.0.1:$port:8080" \
+              watcher:ci
+            # Bail the moment the container dies instead of polling a port that
+            # anything else could be holding: a foreign-arch image with no
+            # binfmt handler exits instantly, and that failure once looked
+            # healthy. arm64 is emulated here, so allow generous retries.
+            for _ in $(seq 1 30); do
+              if [ "$(podman inspect -f '{{.State.Running}}' "w-$arch")" != "true" ]; then
+                echo "container for $arch stopped during startup:"
+                podman logs "w-$arch" || true
+                exit 1
+              fi
+              curl -sf "http://127.0.0.1:$port/healthz" >/dev/null && break || sleep 2
+            done
+            curl -sf "http://127.0.0.1:$port/healthz" > /dev/null
+            test "$(code -X POST http://127.0.0.1:$port/ping/wrong)"  = 404  # mismatch hidden
+            test "$(code -X POST http://127.0.0.1:$port/ping/$token)" = 200  # accepted ping
+            test "$(code       http://127.0.0.1:$port/ping/$token)"   = 404  # GET also hidden
+            podman logs "w-$arch" || true
+            podman rm -f "w-$arch"
+          }
+
+          port=8080
+          for platform in ${PLATFORMS//,/ }; do
+            check_arch "${platform#linux/}" "$port"
+            port=$((port + 1))
+          done
+
+      # --- Publish (skipped on pull_request) ---------------------------------
+      - name: Compute image + tags
+        if: github.event_name != 'pull_request'
+        id: meta
+        run: |
+          set -euo pipefail
+          image="ghcr.io/$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')/watcher-go"
+          if [ "${{ github.event_name }}" = "release" ]; then
+            v="${{ github.ref_name }}"; v="${v#go-v}"          # go-vX.Y.Z -> X.Y.Z
+            tags="$image:$v"
+            # :latest tracks real releases only — a prerelease must not move it.
+            if [ "${{ github.event.release.prerelease }}" != "true" ]; then
+              tags="$tags $image:latest"
+            fi
+          else
+            tags="$image:edge $image:sha-${GITHUB_SHA::12}"
+          fi
+          echo "tags=$tags" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | podman login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Push
+        if: github.event_name != 'pull_request'
+        run: |
+          set -euo pipefail
+          # `manifest push --all` sends the list and both arch manifests; a plain
+          # `podman push` would publish only the runner's arch.
+          for t in ${{ steps.meta.outputs.tags }}; do
+            podman manifest push --all watcher:ci "docker://$t"
+          done
