@@ -23,3 +23,6 @@ watcher-state.json
 # python
 __pycache__/
 *.pyc
+
+# go build output
+go/bin/
