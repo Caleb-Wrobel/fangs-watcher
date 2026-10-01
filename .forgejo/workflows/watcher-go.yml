@@ -1,0 +1,44 @@
+# The Go watcher's GATES, run on the fleet's own CI runner — morel (fangs roles/act_runner), host
+# mode, linux/amd64 like hugin, which runs this code. Same gates as .github/workflows/watcher-go.yml:
+# formatting, vet, the unit suite under -race, then the SPEC.md contract smoke.
+#
+# Building and publishing the GHCR image stays on GitHub (see PUBLISHING.md): Forgejo's push mirror
+# feeds GitHub every commit, and the GitHub workflow builds + publishes from there, unchanged.
+#
+# Forgejo reads .forgejo/workflows and IGNORES .github/workflows whenever this directory exists, so the
+# GitHub-only workflows (ubuntu-24.04 runners, which the fleet doesn't have) no longer queue here.
+#
+# No downloads on a routine run: actions/checkout comes from the forge's own pull mirror; the Go
+# toolchain is the version go.mod pins, fetched ONCE per version into the runner's persistent GOPATH
+# (GOTOOLCHAIN=auto, set by roles/act_runner); and the watcher is stdlib-only, so no modules either.
+name: watcher-go
+
+on:
+  push:
+    paths: ['go/**', 'smoke/**', 'SPEC.md', '.forgejo/workflows/watcher-go.yml']
+  pull_request:
+    paths: ['go/**', 'smoke/**', 'SPEC.md', '.forgejo/workflows/watcher-go.yml']
+
+jobs:
+  gates:
+    runs-on: host
+    steps:
+      - uses: https://forgejo.fangs.internal/actions/checkout@v4
+
+      # The first run after a go.mod bump fetches that toolchain once; every later run is local.
+      - name: Go toolchain (pinned by go.mod)
+        working-directory: go
+        run: go version
+
+      # --- Gate 0: unit suite, vet, formatting -------------------------------
+      - name: Vet, format, and unit tests
+        working-directory: go
+        run: |
+          set -euo pipefail
+          test -z "$(gofmt -l .)" || { echo "gofmt needed:"; gofmt -l .; exit 1; }
+          go vet ./...
+          go test -race ./...
+
+      # --- Gate 1: the code passes the contract ------------------------------
+      - name: Contract smoke (dev path)
+        run: ./smoke/smoke.py go
