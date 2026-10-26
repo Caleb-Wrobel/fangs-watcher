@@ -14,6 +14,7 @@
 name: watcher-go
 
 on:
+  workflow_dispatch:   # run the gates on demand (fj actions dispatch / the UI's Run workflow)
   push:
     paths: ['go/**', 'smoke/**', 'SPEC.md', '.forgejo/workflows/watcher-go.yml']
   pull_request:
